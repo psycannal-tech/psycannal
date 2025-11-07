@@ -1,99 +1,97 @@
 import os
 import logging
-from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 from openai import OpenAI
 
-# ===== логування =====
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-# ===== змінні середовища =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# якщо немає токена — одразу показати в логах
-if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN не заданий у змінних середовища!")
-if not OPENAI_API_KEY:
-    logger.warning("⚠️ OPENAI_API_KEY не заданий — бот відповідатиме без ШІ")
+# клієнт OpenAI без всяких proxies — це було джерело помилки минулого разу
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-client = None
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===== Telegram-логіка =====
-WELCOME = (
-    "Привіт 🌿 Я Harmonia.\n"
-    "Напиши, що турбує — я відповім.\n"
-    "Або введи /vprava, щоб отримати психо-вправу."
-)
-
+# ---------------- команді бота ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME)
+    text = (
+        "Привіт 🌿 Я Гармонія.\n"
+        "Можу дати вправу — /vprava\n"
+        "А можу просто підтримати — напиши, що турбує 💬"
+    )
+    await update.message.reply_text(text)
+
 
 async def vprava(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🧘 Вправа «4-7-8»:\n"
-        "1) вдих на 4\n"
-        "2) затримка на 7\n"
-        "3) видих на 8\n"
-        "Повтори 4 кола."
+    text = (
+        "🌸 Вправа на заземлення:\n"
+        "1. Назви 5 предметів, які бачиш.\n"
+        "2. 4 звуки, які чуєш.\n"
+        "3. 3 дотики, які відчуваєш.\n"
+        "4. 2 запахи.\n"
+        "5. 1 приємну думку 💚"
     )
+    await update.message.reply_text(text)
 
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
 
-    # якщо нема ключа openai – відповідаємо простим текстом
-    if client is None:
-        await update.message.reply_text("Я поки без ШІ, але я тут 🙂 Напиши /vprava.")
-        return
-
+# ---------------- чат через OpenAI ----------------
+async def chat_with_ai(user_text: str) -> str:
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ти доброзичливий психологічний асистент українською."},
+                {
+                    "role": "system",
+                    "content": (
+                        "Ти емпатичний україномовний психологічний асистент. "
+                        "Відповідай коротко, підтримуюче, без медичних діагнозів."
+                    ),
+                },
                 {"role": "user", "content": user_text},
             ],
+            max_tokens=300,
         )
-        answer = resp.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
-        answer = "Схоже, в мене зараз технічна пауза 🤖 Спробуй трохи пізніше."
-    await update.message.reply_text(answer)
+        return "Схоже, в мене технічна пауза 😔 Спробуй ще раз трохи пізніше."
 
 
-def make_telegram_app() -> Application:
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    reply = await chat_with_ai(user_text)
+    await update.message.reply_text(reply)
+
+
+async def main():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN не заданий в environment variables")
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY не заданий — відповіді ШІ не працюватимуть")
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vprava", vprava))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
-    return app
+    # усе інше — в ШІ
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ===== Flask, щоб Render бачив, що ми живі =====
-flask_app = Flask(__name__)
+    logger.info("Bot is running (polling)...")
+    await app.run_polling(stop_signals=None)
 
-@flask_app.get("/")
-def home():
-    return "Harmonia bot is running ✅"
-
-async def run_telegram(app: Application):
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    logger.info("🤖 Telegram bot started (polling)")
-
-def main():
-    tg_app = make_telegram_app()
-
-    import asyncio
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_telegram(tg_app))
-
-    port = int(os.getenv("PORT", 8000))
-    flask_app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+
+    asyncio.run(main())
